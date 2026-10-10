@@ -18,9 +18,37 @@ const schema = z.object({
 
 const genericResult = { ok: true, message: 'If this is a new email, your interest has been saved.' };
 
+// Netlify may report an internal deploy URL in request.url. Validate the browser
+// Origin against public URLs configured by us or provided by Netlify instead.
+function trustedOrigins(request: NextRequest): Set<string> {
+  const candidates = [
+    process.env.NEXT_PUBLIC_SITE_URL,
+    process.env.URL, // Netlify's main URL (also available in Functions).
+    process.env.SITE_NAME ? `https://${process.env.SITE_NAME}.netlify.app` : undefined,
+    ...(process.env.WAITLIST_ALLOWED_ORIGINS || '').split(','),
+  ];
+  if (process.env.NODE_ENV !== 'production') {
+    candidates.push(new URL(request.url).origin);
+  }
+
+  const origins = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate?.trim()) continue;
+    try {
+      const parsed = new URL(candidate.trim());
+      if (parsed.protocol === 'https:' || (process.env.NODE_ENV !== 'production' && parsed.protocol === 'http:')) {
+        origins.add(parsed.origin);
+      }
+    } catch {
+      // Ignore malformed configuration values rather than trusting them.
+    }
+  }
+  return origins;
+}
+
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
-  if (origin && origin !== new URL(request.url).origin) {
+  if (origin && !trustedOrigins(request).has(origin)) {
     return NextResponse.json({ ok: false, message: 'Invalid origin.' }, { status: 403 });
   }
   const contentLength = Number(request.headers.get('content-length') || 0);
@@ -56,7 +84,7 @@ export async function POST(request: NextRequest) {
         method: 'POST', body: form, cache:'no-store', signal: AbortSignal.timeout(4500),
       });
       const result: { success?: boolean; hostname?: string } = await verify.json();
-      if (!result.success || (result.hostname && result.hostname !== new URL(request.url).hostname)) {
+      if (!result.success || (result.hostname && result.hostname !== (origin ? new URL(origin).hostname : new URL(request.url).hostname))) {
         return NextResponse.json({ ok: false, message: 'Security check failed. Please try again.' }, { status: 400 });
       }
     } catch {
